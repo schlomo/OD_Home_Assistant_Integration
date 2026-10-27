@@ -25,11 +25,13 @@ display geometries ``dev/inject-displays.py`` seeds. That is a real send
 minus BLE delivery; what a physical panel's dither/palette makes of the PNG
 is outside its reach.
 
-One test documents a gap rather than guarding against it -- an open
-maintainer decision, not settled here: ``test_whole_demo_renders_on_ha``
-(strict xfail). The demo's ``dlimg`` references ``/local/showcase.png``,
-which the designer serves from its own bundle but odl-renderer opens as a
-filesystem path that exists on no Home Assistant install.
+The demo's ``dlimg`` once referenced ``/local/showcase.png``, which the
+designer served from its own bundle but odl-renderer opened as a filesystem
+path that exists on no Home Assistant install (``Image file not found:
+/local/showcase.png``). Since designer 3.6.0 the image travels inside the
+payload as a ``data:`` URI (odl-drawcustom-designer#198), so the whole demo
+-- image included -- renders here; ``test_demo_bundled_image_is_self_contained``
+keeps it that way.
 """
 
 from dataclasses import replace
@@ -202,17 +204,6 @@ def prerendered_demo(seeded_hass, demo_payload, demo_simulator):
     return _prerender(seeded_hass, demo_payload, demo_simulator["variables"])
 
 
-def _without_bundled_image(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop the one ``dlimg`` that cannot render on any HA today.
-
-    ``test_whole_demo_renders_on_ha`` keeps that gap visible; the exclusion
-    is counted so a demo change does not widen it.
-    """
-    kept = [element for element in payload if element["type"] != "dlimg"]
-    assert len(kept) == len(payload) - 1
-    return kept
-
-
 async def _render(hass_client, device_id: str, payload: list[dict[str, Any]]):
     client = await hass_client()
     return await client.post(
@@ -275,9 +266,7 @@ async def test_prerendered_demo_renders_to_png_at_every_fabricated_geometry(
     image preload and ``generate_image`` call, so this is a real send minus
     BLE delivery.
     """
-    resp = await _render(
-        hass_client, device_id, _without_bundled_image(prerendered_demo)
-    )
+    resp = await _render(hass_client, device_id, prerendered_demo)
 
     if resp.status != 200:
         pytest.fail(f"render returned {resp.status}: {await resp.text()}")
@@ -302,7 +291,7 @@ async def test_prerendered_demo_dry_run_sends_at_every_fabricated_geometry(
         "drawcustom",
         {
             "device_id": [device_id],
-            "payload": _without_bundled_image(prerendered_demo),
+            "payload": prerendered_demo,
             "dry-run": True,
         },
         blocking=True,
@@ -312,22 +301,21 @@ async def test_prerendered_demo_dry_run_sends_at_every_fabricated_geometry(
     assert response["status"] == "dry_run"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OPEN DECISION: the demo's dlimg url '/local/showcase.png' is served by "
-        "the designer from its own bundle, but odl-renderer opens it as a "
-        "filesystem path ('Image file not found: /local/showcase.png'), which "
-        "no HA install has. Whether the designer rewrites the url before "
-        "sending, the panel maps /local/ to <config>/www, or the send path "
-        "does, is the maintainer's call. Strict: once any of those lands, this "
-        "test flips and must become a plain assertion."
-    ),
-)
-async def test_whole_demo_renders_on_ha(hass_client, device_id, prerendered_demo):
-    """The demo exactly as Load Demo ships it, including the bundled image."""
-    resp = await _render(hass_client, device_id, prerendered_demo)
-    assert resp.status == 200, await resp.text()
+def test_demo_bundled_image_is_self_contained(demo_payload):
+    """The demo's image travels inside the payload, not as a path on the HA host.
+
+    odl-renderer resolves a ``dlimg`` url with a leading ``/`` on the Home
+    Assistant host's filesystem, and the designer's bundle lives nowhere
+    there: designer 3.4.9 shipped ``/local/showcase.png`` and the demo
+    failed with ``Image file not found``. A ``data:`` URI needs no file.
+    The geometry tests above prove it decodes; this guards the shape so a
+    future demo edit cannot reintroduce a host path unnoticed.
+    """
+    images = [element for element in demo_payload if element["type"] == "dlimg"]
+
+    assert images, "the demo stopped shipping an image; drop this guard knowingly"
+    for element in images:
+        assert element["url"].startswith("data:image/"), element["url"]
 
 
 async def test_raw_send_renders_designer_variables_empty(
