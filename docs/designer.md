@@ -446,10 +446,12 @@ them differently: `odl_renderer.media_loader.load_image` takes an
 **absolute path** and opens it directly — there is no bare-name image
 search path the way there is for fonts. So the reference reaching this
 endpoint is whatever path the payload carries, with one alias: `/local/<name>`
-means `<config>/www/<name>`, the same as everywhere in Home Assistant, and
-the send/render path applies the identical translation before opening the
-file (a `/local/` reference that would leave `www` is left as written and
-fails as the literal path it names). Beyond that alias the endpoint is
+means `<config>/www/<name>`, the same as everywhere in Home Assistant, read
+the way HA's own `/local/` handler reads it (query string and fragment
+ignored, path percent-decoded), and the send/render path applies the
+identical translation before opening the file (a `/local/` reference that
+would leave `www`, or that the filesystem cannot look at, is left as written
+and fails as the literal path it names). Beyond that alias the endpoint is
 deliberately **stricter than the renderer**:
 
 | | Rule |

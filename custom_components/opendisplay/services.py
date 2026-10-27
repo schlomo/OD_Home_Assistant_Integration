@@ -12,7 +12,7 @@ import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import aiohttp
 from homeassistant.components.bluetooth import (
@@ -1146,17 +1146,29 @@ def resolve_local_image_reference(www_dir: str, reference: str) -> str:
     alias, so without this a payload's `url: /local/pic.png` failed every
     send and render with ``Image file not found: /local/pic.png``.
 
+    The reference is a URL and is read the way HA's static handler for
+    `/local/` reads it: query string and fragment ignored
+    (`/local/pic.png?v=3` is the usual cache-buster form), path
+    percent-decoded (`/local/kitchen%20photo.png` is `www/kitchen photo.png`).
+
     Anything that is not a `/local/` reference is returned unchanged. So is
-    a `/local/` reference that would leave `www` -- `..` segments or a
-    symlink pointing out, checked after `resolve()` -- which then fails as
-    the literal path it names, never as a file outside `www`; HA's own
-    static handler for `/local/` serves nothing above `www` either. Does
-    filesystem work (`resolve()`), so call it off the event loop.
+    a `/local/` reference that would leave `www` -- `..` segments (encoded
+    or not) or a symlink pointing out, checked after `resolve()` -- or one
+    the filesystem cannot look at at all (an embedded NUL byte makes
+    `resolve()` raise). Each then fails as the literal path it names, inside
+    the renderer's own error handling, never as a file outside `www` and
+    never as an exception out of the executor; HA's own static handler for
+    `/local/` serves nothing above `www` either. Does filesystem work
+    (`resolve()`), so call it off the event loop.
     """
     if not reference.startswith(LOCAL_URL_PREFIX):
         return reference
-    root = Path(www_dir).resolve()
-    candidate = (root / reference.removeprefix(LOCAL_URL_PREFIX)).resolve()
+    name = unquote(urlsplit(reference).path.removeprefix(LOCAL_URL_PREFIX))
+    try:
+        root = Path(www_dir).resolve()
+        candidate = (root / name).resolve()
+    except OSError, ValueError:
+        return reference
     if not candidate.is_relative_to(root):
         return reference
     return str(candidate)

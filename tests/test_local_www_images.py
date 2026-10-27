@@ -231,3 +231,85 @@ def test_local_reference_escaping_www_is_left_as_written(tmp_path: Path) -> None
         www / "pic.png"
     )
     assert resolve_local_image_reference(str(www), "/media/pic.png") == "/media/pic.png"
+
+
+# --- Review round 1 (Copilot on fork PR #2): the alias is a URL, map it like
+# HA's own `/local/` static handler does -- query string and fragment ignored,
+# path percent-decoded -- and a name the filesystem cannot even look at fails
+# as the literal reference instead of escaping the executor as an exception.
+
+
+async def test_render_endpoint_ignores_a_query_string_on_a_local_reference(
+    hass, hass_client, www_dir: Path
+) -> None:
+    """`/local/pic.png?v=123` -- the usual cache-buster form -- is `www/pic.png`."""
+    _png(www_dir / "pic.png")
+
+    resp = await _render_8x8(hass_client, "/local/pic.png?v=123")
+
+    assert resp.status == 200, await resp.text()
+    assert await _corner_pixel(resp) == _BLACK
+
+
+async def test_render_endpoint_percent_decodes_a_local_reference(
+    hass, hass_client, www_dir: Path
+) -> None:
+    """`/local/kitchen%20photo.png` is `www/kitchen photo.png`, as HA serves it."""
+    _png(www_dir / "kitchen photo.png")
+
+    resp = await _render_8x8(hass_client, "/local/kitchen%20photo.png")
+
+    assert resp.status == 200, await resp.text()
+    assert await _corner_pixel(resp) == _BLACK
+
+
+async def test_asset_ignores_a_query_string_on_a_local_reference(
+    hass, hass_client, www_dir: Path
+) -> None:
+    """The canvas gets the same `www` file for the cache-buster form too."""
+    expected = _png(www_dir / "pic.png")
+
+    client = await hass_client()
+    resp = await client.get(
+        DESIGNER_ASSET_URL, params={"kind": "image", "name": "/local/pic.png?v=123"}
+    )
+
+    assert resp.status == 200, await resp.text()
+    assert await resp.read() == expected
+
+
+async def test_render_reports_a_local_reference_with_a_nul_byte_as_invalid_payload(
+    hass, hass_client, www_dir: Path
+) -> None:
+    """A `/local/` reference with an embedded NUL byte answers the renderer's 400, not a 500.
+
+    `Path.resolve()` raises `ValueError` on an embedded NUL byte. The
+    preload runs in an executor outside the render endpoint's own
+    try/except, so before this the error escaped as a 500; the reference is
+    left as written instead and fails inside the renderer like any other
+    unreadable path.
+    """
+    resp = await _render_8x8(hass_client, "/local/pic\x00.png")
+
+    assert resp.status == 400
+    assert "invalid payload" in (await resp.json())["message"]
+
+
+def test_local_reference_is_mapped_like_the_http_alias(tmp_path: Path) -> None:
+    """Query and fragment dropped, path percent-decoded, escapes still refused."""
+    www = tmp_path / "www"
+    www.mkdir()
+
+    assert resolve_local_image_reference(str(www), "/local/pic.png?v=123#top") == str(
+        www / "pic.png"
+    )
+    assert resolve_local_image_reference(str(www), "/local/kitchen%20photo.png") == str(
+        www / "kitchen photo.png"
+    )
+    # A percent-encoded `..` decodes to a real `..` and is refused the same way.
+    assert resolve_local_image_reference(str(www), "/local/%2e%2e/escape.png") == (
+        "/local/%2e%2e/escape.png"
+    )
+    assert resolve_local_image_reference(str(www), "/local/pic\x00.png") == (
+        "/local/pic\x00.png"
+    )
