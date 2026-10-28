@@ -9,6 +9,7 @@ itself never talks to Home Assistant directly.
 ## Contents
 - [Architecture](#architecture)
 - [Preview isolation](#preview-isolation)
+- [Variables](#variables)
 - [The render endpoint](#the-render-endpoint)
 - [The asset endpoint](#the-asset-endpoint)
 - [Access and exposure](#access-and-exposure)
@@ -29,8 +30,8 @@ YAML, and a `send` host action this integration registers.
 | `targets` | Every HA device on the `opendisplay` platform with published capability attributes (`designer/capabilities.py`, gated on `pixel_width > 0` so a device whose capabilities haven't landed yet, or failed to build, never becomes a fabricated target) |
 | `states` | Every HA entity state (`hass.states`), with `attributes.friendly_name` promoted to the designer's `name` field |
 | `actions` | One button, `send`, disabled with a human reason while sending, the YAML is invalid, or no display is selected |
-| `onAction('send', …)` | Calls the `opendisplay.drawcustom` service against the selected target's device, with `dither` and `rotate` read live off the action context at click time |
-| `renderPreview` | POSTs to this integration's own render endpoint (below) and hands back the PNG bytes |
+| `onAction('send', …)` | Calls the `opendisplay.drawcustom` service against the selected target's device, with `dither` and `rotate` read live off the action context at click time, and every templated field already rendered with the designer's Variables (below) |
+| `renderPreview` | Pre-renders the payload the same way, POSTs to this integration's own render endpoint (below) and hands back the PNG bytes |
 | `resolveAsset` | GETs this integration's own asset endpoint (below) for a font or image the designer couldn't resolve locally, and hands back the bytes |
 | `hostOwnsAssets` | `{ hint: '…' }` (designer 3.4.0) — turns off designer-local uploads and replaces the Content tab's upload instructions with a sentence naming where a file actually needs to live so `resolveAsset` above can find it |
 
@@ -68,6 +69,40 @@ completely separate from sending it to a real panel:
 A dashboard showing a device's real `image.*` entity is guaranteed to never
 change because someone was previewing a design for that same device — the
 preview path has no code path that could write to it.
+
+## Variables
+
+The designer's Variables (its State Simulator "Variables" tab, literal
+strings, handed to the panel as `context.variables` on both `onAction` and
+`renderPreview`) are the analog of an automation's script-level
+`variables:`. Home Assistant renders a script's service data with those as
+Jinja context (`template.render_complex`) *before* the service handler
+runs; a service called directly has no such step, which is why a template
+like `{{ 'red' if alert else 'white' }}` rendered white on a real display
+while the designer's own preview showed red.
+
+The panel does that step itself (`panel/template-prerender.js`): before
+Send and before every preview it renders each templated field value
+(`{{`, `{%` or `{#`, HA's own `is_template_string` test) through HA's
+`render_template` websocket command with the Variables, strict, and then
+calls the **unchanged** `opendisplay.drawcustom` service (or the render
+endpoint) with literal values. Send and preview share the one procedure, so
+the preview is rendered from exactly the literals the display receives.
+
+An undefined variable or an invalid template fails the send or preview
+before anything reaches Home Assistant, naming the element and field:
+
+```
+Send failed: Element 6 (type 'circle') field 'fill' has an invalid template: UndefinedError: 'alert' is undefined
+```
+
+The service itself is untouched: `render_payload_templates` (`services.py`)
+still renders whatever templates reach it, with no variables, exactly as
+for a call from an automation. A designer release older than the one that
+introduced `context.variables` hands over no field at all; the panel then
+renders with an empty variable set, still through HA.
+`tests/test_designer_demo_render.py` models the same procedure with HA's own
+`render_complex` against the designer's Load Demo.
 
 ## The render endpoint
 
