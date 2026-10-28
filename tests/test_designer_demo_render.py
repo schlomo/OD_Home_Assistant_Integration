@@ -28,19 +28,20 @@ made it the wrong demo for Home Assistant:
 
 The HA demo references only entities every Home Assistant install has
 (``sun.sun``, ``zone.home``, the ``person`` domain) plus template globals
-such as ``now()``. This module renders it through the panel's shipped send
-procedure (maintainer decision 2026-10-27): the designer's variables are the
-analog of an automation's script-level ``variables:``, so the panel
-pre-renders every templated field with those variables as Jinja context --
-what HA's script engine does with ``template.render_complex(data,
-variables)`` before a service handler runs -- and then calls the untouched
-``opendisplay.drawcustom`` service with literal YAML. ``_prerender`` below
-is that first step, strict (an undefined variable fails instead of
-degrading to ''); the render endpoint and a ``dry-run`` service call are
-the second, at the three fabricated display geometries
-``dev/inject-displays.py`` seeds. That is a real send minus BLE delivery;
-what a physical panel's dither/palette makes of the PNG is outside its
-reach.
+such as ``now()``. This module renders it through the send procedure PR #4
+adds to the panel (maintainer decision 2026-10-27; modelled here with HA's
+own template engine, not imported from the panel JS): the designer's
+variables are the analog of an automation's script-level ``variables:``,
+so the panel pre-renders every templated field with those variables as
+Jinja context -- what HA's script engine does with
+``template.render_complex(data, variables)`` before a service handler runs
+-- and then calls the untouched ``opendisplay.drawcustom`` service with
+literal YAML. ``_prerender`` below is that first step, strict (an undefined
+variable fails instead of degrading to ''); the render endpoint and a
+``dry-run`` service call are the second, at the three fabricated display
+geometries ``dev/inject-displays.py`` seeds. That is a real send minus BLE
+delivery; what a physical panel's dither/palette makes of the PNG is
+outside its reach.
 
 The harness Home Assistant seeds **no states**: it sets up the ``sun``,
 ``zone`` and ``person`` integrations exactly as every install does and
@@ -64,6 +65,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.template import Template, TemplateError, is_template_string
 from homeassistant.setup import async_setup_component
 from odl_renderer.colors import WHITE, ColorResolver
+from odl_renderer.types import ElementType
 from opendisplay import ColorScheme
 from PIL import Image as PILImage
 import pytest
@@ -88,10 +90,19 @@ DEMO_DIR = (
     / "demo"
 )
 
-# Integrations every Home Assistant install runs (all three are in
-# default_config and cannot be removed from the onboarding flow). Setting
-# them up is the whole of the harness's entity population.
+# The integrations the demo's entities come from. ``person`` and ``zone``
+# are in Home Assistant's core bootstrap (``bootstrap.DEFAULT_INTEGRATIONS``);
+# ``sun`` is a ``default_config`` dependency, so every onboarded install has
+# it unless its configuration.yaml drops ``default_config:``. Setting them up
+# is the whole of the harness's entity population.
 _STOCK_INTEGRATIONS = ("sun", "zone", "person")
+# What a configuration.yaml without ``default_config:`` still has.
+_CORE_BOOTSTRAP_INTEGRATIONS = ("zone", "person")
+
+# Element types odl-renderer knows that the demo deliberately lacks: the
+# plot (needs recorder history no stock entity has) and the diagram (the
+# designer has no such element -- its bundle does not contain the word).
+_ELEMENT_TYPES_NOT_IN_DEMO = {"plot", "diagram"}
 
 # The geometries dev/inject-displays.py seeds into a disposable HA, so the
 # demo renders at every size and colour scheme a developer can see live.
@@ -111,8 +122,10 @@ _TEMPLATE_LOGGER = "homeassistant.helpers.template"
 # A quoted entity id inside a template: 'sun.sun', "zone.home". Font names
 # (rbm.ttf) and icons (mdi:home) are never quoted that way in the demo.
 _QUOTED_ENTITY_ID = re.compile(r"""['"]([a-z_]+\.[a-z0-9_]+)['"]""")
-# A domain iteration: states.person, states.sensor.
-_DOMAIN_ITERATION = re.compile(r"\bstates\.([a-z_]+)\b")
+# An unquoted entity access: states.sun.sun, states.zone.home.state.
+_UNQUOTED_ENTITY_ID = re.compile(r"\bstates\.([a-z_]+\.[a-z0-9_]+)\b")
+# A domain iteration: states.person, states.sensor (no object id after it).
+_DOMAIN_ITERATION = re.compile(r"\bstates\.([a-z_]+)\b(?!\.[a-z0-9_])")
 
 
 @pytest.fixture
@@ -170,6 +183,16 @@ async def stock_hass(hass):
     return hass
 
 
+@pytest.fixture
+async def core_only_hass(hass):
+    """Return hass as a configuration.yaml without ``default_config:`` leaves it: no ``sun``."""
+    for domain in _CORE_BOOTSTRAP_INTEGRATIONS:
+        assert await async_setup_component(hass, domain, {domain: {}})
+    await hass.async_block_till_done()
+    assert hass.states.get("sun.sun") is None
+    return hass
+
+
 @pytest.fixture(autouse=True)
 async def setup_entry(hass, mock_config_entry: MockConfigEntry) -> None:
     """Set up the config entry for the fabricated display."""
@@ -215,10 +238,10 @@ def _prerender(
 ) -> list[dict[str, Any]]:
     """Render the payload's templates with the demo's variables, field by field.
 
-    The panel's shipped send procedure, step one: HA's own template engine
-    with the demo's variables as Jinja context, strict. A field whose
-    template raises fails the test naming element index, type and field,
-    mirroring the live send's error text.
+    Step one of the send procedure PR #4 adds to the panel, modelled with
+    HA's own template engine: the demo's variables as Jinja context, strict.
+    A field whose template raises fails the test naming element index, type
+    and field, mirroring the live send's error text.
     """
     rendered = []
     for index, element in enumerate(payload):
@@ -277,17 +300,62 @@ async def _render(hass_client, device_id: str, payload: list[dict[str, Any]]):
     )
 
 
+def _template_strings(value: Any):
+    """Yield every template string in a field value, nested lists and dicts included.
+
+    The same walk ``_render_strict`` (and HA's ``render_complex``) does, so
+    a template hidden in a list or a nested mapping is scanned too.
+    """
+    if isinstance(value, str):
+        if is_template_string(value):
+            yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from _template_strings(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _template_strings(item)
+
+
 def _referenced_entities(payload: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
-    """Return every (entity id, iterated domain) the demo's templates name."""
+    """Return every (entity id, iterated domain) the demo's templates name.
+
+    Entity ids are matched both quoted (``states('sun.sun')``,
+    ``is_state("zone.home", ...)``) and unquoted (``states.sun.sun``); a
+    bare ``states.person`` is a domain iteration.
+    """
     entity_ids: set[str] = set()
     domains: set[str] = set()
-    for element in payload:
-        for value in element.values():
-            if not (isinstance(value, str) and is_template_string(value)):
-                continue
-            entity_ids.update(_QUOTED_ENTITY_ID.findall(value))
-            domains.update(_DOMAIN_ITERATION.findall(value))
+    for template in _template_strings(payload):
+        entity_ids.update(_QUOTED_ENTITY_ID.findall(template))
+        entity_ids.update(_UNQUOTED_ENTITY_ID.findall(template))
+        domains.update(_DOMAIN_ITERATION.findall(template))
     return entity_ids, domains
+
+
+def test_referenced_entities_scans_nested_fields_and_unquoted_access():
+    """The scanner sees what the renderer renders: nested fields, both reference styles."""
+    payload = [
+        {
+            "type": "text",
+            "value": "{{ states('sun.sun') }}",
+            "nested": {"deep": ["{{ states.zone.home.state }}", "literal"]},
+            "points": [[1, 2], [3, 4]],
+        },
+        {
+            "type": "icon",
+            "value": "{{ states.person | list | count }} {{ states.sensor }}",
+        },
+        {
+            "type": "text",
+            "value": "{{ is_state_attr(\"binary_sensor.door\", 'on', true) }}",
+        },
+    ]
+
+    entity_ids, domains = _referenced_entities(payload)
+
+    assert entity_ids == {"sun.sun", "zone.home", "binary_sensor.door"}
+    assert domains == {"person", "sensor"}
 
 
 async def test_demo_references_only_entities_every_install_has(
@@ -322,10 +390,11 @@ async def test_demo_prerenders_through_ha_jinja_with_its_variables(
     field 'progress' has an invalid template: TypeError: unsupported
     operand type(s) for /: 'str' and 'int'`` (designer 3.4.9's showcase).
 
-    The render is strict, so a variable the demo references but does not
-    define raises here too, and a template that merely warns (a missing
-    attribute, an unknown filter argument) fails as well: a demo that logs
-    warnings on every Load Demo is not a clean demo.
+    The render is strict, as the pre-render PR #4 adds to the panel is, so
+    a variable the demo references but does not define raises here too; a
+    template that merely warns (a missing attribute, an unknown filter
+    argument) fails as well, because a demo that logs warnings on every
+    Load Demo is not a clean demo.
     """
     caplog.set_level(logging.WARNING, logger=_TEMPLATE_LOGGER)
     assert demo_variables == {"accent_color": "red", "alert": "true"}, (
@@ -350,8 +419,30 @@ async def test_demo_prerenders_through_ha_jinja_with_its_variables(
         for value in element.values():
             assert not (isinstance(value, str) and is_template_string(value))
             if isinstance(value, str):
-                assert "unknown" not in value, element
-                assert "unavailable" not in value, element
+                for missing in ("unknown", "unavailable", "None"):
+                    assert missing not in value, element
+
+
+async def test_demo_degrades_without_default_config_instead_of_failing(
+    core_only_hass, demo_payload, demo_variables
+):
+    """On an install without ``default_config:`` (no ``sun``) the demo still sends.
+
+    ``state_attr('sun.sun', ...)`` is ``None`` there, and ``round``/
+    ``as_timestamp`` raise on ``None`` -- a first cut of this demo failed
+    such a send with ``round got invalid input 'None'``. The demo passes
+    each of them a default, so the sun fields read "?"/"unknown" and the
+    send goes through. Strict, as the real pre-render is.
+    """
+    rendered = _prerender(core_only_hass, demo_payload, demo_variables)
+
+    sun_fields = [
+        element["value"]
+        for element in rendered
+        if element["type"] == "text" and "Sun" in str(element.get("value", ""))
+    ]
+    assert sun_fields, "the demo stopped showing the sun; re-derive this test"
+    assert any("?" in value or "unknown" in value for value in sun_fields), sun_fields
 
 
 def test_demo_has_no_plot_element(demo_payload):
@@ -366,25 +457,21 @@ def test_demo_has_no_plot_element(demo_payload):
 
 
 def test_demo_shows_every_other_element_type(demo_payload):
-    """The demo still demonstrates every drawcustom element type but the plot."""
-    expected = {
-        "arc",
-        "circle",
-        "debug_grid",
-        "dlimg",
-        "ellipse",
-        "icon",
-        "icon_sequence",
-        "line",
-        "multiline",
-        "polygon",
-        "progress_bar",
-        "qrcode",
-        "rectangle",
-        "rectangle_pattern",
-        "text",
-    }
-    assert {e["type"] for e in demo_payload} == expected
+    """The demo demonstrates every element type odl-renderer knows, bar plot and diagram.
+
+    Derived from the pinned odl-renderer's ``ElementType`` rather than a
+    hand-kept list, so a renderer release that adds an element type fails
+    this test until the demo shows it (or the exclusion set says why not).
+    ``plot`` is excluded by design (no stock entity has recorder history);
+    ``diagram`` because the designer has no such element -- verified against
+    the vendored bundle, which does not contain the word.
+    """
+    renderer_types = {member.value for member in ElementType}
+    assert renderer_types >= _ELEMENT_TYPES_NOT_IN_DEMO
+
+    assert {
+        e["type"] for e in demo_payload
+    } == renderer_types - _ELEMENT_TYPES_NOT_IN_DEMO
 
 
 @_ALL_GEOMETRIES

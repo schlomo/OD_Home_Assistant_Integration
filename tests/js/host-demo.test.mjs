@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  DEFAULT_TIMEOUT_MS,
   hostDemoUrls,
   loadHostDemoOptions,
 } from '../../custom_components/opendisplay/designer/frontend/panel/host-demo.js';
@@ -29,21 +30,32 @@ function okFetch(overrides = {}) {
     ...overrides,
   };
   const calls = [];
-  const fetchImpl = async (url) => {
-    calls.push(String(url));
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), init });
     const name = String(url).split('/').pop();
     const res = bodies[name];
     if (res instanceof Error) throw res;
+    if (res === 'hang') {
+      // A fetch that never settles on its own -- only the abort signal the
+      // module passes can end it, exactly like a stalled network request.
+      return new Promise((_, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason));
+      });
+    }
     return res;
   };
   fetchImpl.calls = calls;
   return fetchImpl;
 }
 
-function warnSpy() {
+function fallbackSpy() {
   const spy = (...args) => spy.calls.push(args);
   spy.calls = [];
   return spy;
+}
+
+async function load(fetchImpl, onFallback, extra = {}) {
+  return await loadHostDemoOptions(MODULE_URL, { fetchImpl, onFallback, ...extra });
 }
 
 test('the demo files live next to the panel module, served by the same static view', () => {
@@ -59,28 +71,54 @@ test('the demo files live next to the panel module, served by the same static vi
 });
 
 test('the loaded demo becomes the designer `demo` mount option, payload and variables', async () => {
-  const warn = warnSpy();
-  const options = await loadHostDemoOptions(MODULE_URL, okFetch(), warn);
+  const onFallback = fallbackSpy();
+  const options = await load(okFetch(), onFallback);
   assert.deepEqual(options, { demo: { payload: PAYLOAD, variables: VARIABLES } });
-  assert.deepEqual(warn.calls, []);
+  assert.deepEqual(onFallback.calls, []);
 });
 
-test('a fetch that rejects falls back to the bundled demo: no option, one warning, no throw', async () => {
-  const warn = warnSpy();
-  const fetchImpl = okFetch({ 'demo.yml': new Error('offline') });
-  const options = await loadHostDemoOptions(MODULE_URL, fetchImpl, warn);
+test('every fetch carries an abort signal with the default timeout', async () => {
+  const fetchImpl = okFetch();
+  await load(fetchImpl, fallbackSpy());
+  assert.equal(fetchImpl.calls.length, 2);
+  for (const { init } of fetchImpl.calls) {
+    assert.ok(init.signal instanceof AbortSignal, 'fetch was given an AbortSignal');
+  }
+  assert.ok(DEFAULT_TIMEOUT_MS >= 1000, 'the default timeout is not absurdly short');
+});
+
+test('a fetch that never settles is aborted after the timeout and falls back, so the mount never waits forever', async () => {
+  const onFallback = fallbackSpy();
+  const fetchImpl = okFetch({ 'demo.yml': 'hang' });
+  const started = Date.now();
+  const options = await load(fetchImpl, onFallback, { timeoutMs: 50 });
   assert.deepEqual(options, {});
-  assert.equal(warn.calls.length, 1);
-  assert.match(String(warn.calls[0].join(' ')), /offline/);
+  assert.ok(Date.now() - started < 5000, 'resolved by the timeout, not by luck');
+  assert.equal(onFallback.calls.length, 1);
+  assert.match(onFallback.calls[0][0], /timed out|TimeoutError/i);
+});
+
+test('a fetch that rejects falls back to the bundled demo: no option, one user-facing message, no throw', async () => {
+  const onFallback = fallbackSpy();
+  const fetchImpl = okFetch({ 'demo.yml': new Error('offline') });
+  const options = await load(fetchImpl, onFallback);
+  assert.deepEqual(options, {});
+  assert.equal(onFallback.calls.length, 1);
+  const [message] = onFallback.calls[0];
+  assert.equal(typeof message, 'string');
+  assert.match(message, /offline/);
+  // The message is what the panel shows the user, so it says what Load Demo
+  // will do instead -- not just that something failed.
+  assert.match(message, /bundled demo/);
 });
 
 test('a non-2xx answer for either file falls back the same way', async () => {
   for (const name of ['demo.yml', 'demo.json']) {
-    const warn = warnSpy();
+    const onFallback = fallbackSpy();
     const fetchImpl = okFetch({ [name]: { ok: false, status: 404, text: async () => '' } });
-    assert.deepEqual(await loadHostDemoOptions(MODULE_URL, fetchImpl, warn), {});
-    assert.equal(warn.calls.length, 1, name);
-    assert.match(String(warn.calls[0].join(' ')), /404/);
+    assert.deepEqual(await load(fetchImpl, onFallback), {});
+    assert.equal(onFallback.calls.length, 1, name);
+    assert.match(onFallback.calls[0][0], /404/);
   }
 });
 
@@ -91,29 +129,29 @@ test('a malformed variables file falls back rather than mounting a half demo', a
     JSON.stringify({ variables: { alert: true } }),
   ];
   for (const body of cases) {
-    const warn = warnSpy();
+    const onFallback = fallbackSpy();
     const fetchImpl = okFetch({
       'demo.json': { ok: true, status: 200, text: async () => body },
     });
-    assert.deepEqual(await loadHostDemoOptions(MODULE_URL, fetchImpl, warn), {}, body);
-    assert.equal(warn.calls.length, 1, body);
+    assert.deepEqual(await load(fetchImpl, onFallback), {}, body);
+    assert.equal(onFallback.calls.length, 1, body);
   }
 });
 
 test('an empty payload file falls back rather than offering an empty demo', async () => {
-  const warn = warnSpy();
+  const onFallback = fallbackSpy();
   const fetchImpl = okFetch({ 'demo.yml': { ok: true, status: 200, text: async () => '  \n' } });
-  assert.deepEqual(await loadHostDemoOptions(MODULE_URL, fetchImpl, warn), {});
-  assert.equal(warn.calls.length, 1);
+  assert.deepEqual(await load(fetchImpl, onFallback), {});
+  assert.equal(onFallback.calls.length, 1);
 });
 
 test('a variables file without variables still yields the demo (variables are optional)', async () => {
-  const warn = warnSpy();
+  const onFallback = fallbackSpy();
   const fetchImpl = okFetch({
     'demo.json': { ok: true, status: 200, text: async () => '{}' },
   });
-  assert.deepEqual(await loadHostDemoOptions(MODULE_URL, fetchImpl, warn), {
+  assert.deepEqual(await load(fetchImpl, onFallback), {
     demo: { payload: PAYLOAD },
   });
-  assert.deepEqual(warn.calls, []);
+  assert.deepEqual(onFallback.calls, []);
 });

@@ -382,10 +382,18 @@ class OpenDisplayDesignerPanel extends HTMLElement {
     if (this._handle) return;
     // This integration's own Load Demo (host-demo.js), fetched before the
     // designer mounts because `demo` is a mount option, not a later push.
-    // Resolves to `{}` (the designer keeps its bundled demo) on any failure,
-    // never throws. The element can be disconnected while this is in
-    // flight -- HA navigates away and back -- so re-check before mounting.
-    const demoOptions = await loadHostDemoOptions(import.meta.url);
+    // Resolves to `{}` (the designer keeps its bundled demo) on any failure
+    // -- a stalled fetch included, each is aborted after a timeout -- never
+    // throws, and says why once, on the console and as a toast, so the
+    // user knows why Load Demo shows the bundled showcase. The element can
+    // be disconnected while this is in flight -- HA navigates away and
+    // back -- so re-check before mounting.
+    const demoOptions = await loadHostDemoOptions(import.meta.url, {
+      onFallback: (message) => {
+        console.warn(`${TAG}: ${message}`);
+        this._notify(message);
+      },
+    });
     if (this._handle || !this.isConnected) return;
     const mountEl = this._$('od-mount');
     if (!mountEl) return;
