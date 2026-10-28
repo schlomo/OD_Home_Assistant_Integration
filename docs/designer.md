@@ -495,31 +495,52 @@ needs recorder history for a numeric sensor, so on a live install its fields
 rendered "unknown" and Send failed. The panel instead hands the designer
 `custom_components/opendisplay/designer/frontend/demo/demo.yml` (the
 payload) and `demo.json` (its variables) through the `demo` mount option
-(`frontend/panel/host-demo.js`), so Load Demo in Home Assistant loads a
-payload written for it:
+(`frontend/panel/host-demo.js`), a payload written for Home Assistant:
 
-- **Only entities every install has**: `sun.sun` and its attributes
-  (`elevation`, `azimuth`, `next_rising`, `next_setting`, `rising`),
-  `zone.home`, the `person` domain, and template globals such as `now()`.
-  Nothing in the Referenced states list should read "not supplied" on a
-  stock install.
+- **Only entities every `default_config` install has**: `sun.sun` and its
+  attributes (`elevation`, `azimuth`, `next_rising`, `next_setting`,
+  `rising`), `zone.home`, the `person` domain, and template globals such as
+  `now()`. `person` and `zone` are part of Home Assistant's core bootstrap;
+  `sun` comes from `default_config`, which every onboarded install has
+  unless its `configuration.yaml` deliberately drops it. On such a minimal
+  install the sun fields degrade instead of failing -- the state reads
+  "unknown", the times and angles "?" -- because the demo passes a default
+  to `round`, `as_timestamp` and `timestamp_custom`; the send still goes
+  through. Nothing in the Referenced states list should read "not
+  supplied" on a `default_config` install.
 - **No plot element.** No entity every install has carries recorder
-  history. The plot is still available from the editor's insert menu; point
-  it at a numeric sensor of your own.
-- **Variables `alert` and `accent_color`** (Variables tab) drive the circle
-  (red while `alert` is set, white otherwise) and the accent colour of the
-  big icon and the title.
+  history. The plot element is still available from the editor's insert
+  menu; it needs a sensor with recorded history.
+- **Variables `alert` and `accent_color`** (Variables tab) are meant to
+  drive the circle (red while `alert` is set, white otherwise) and the
+  accent colour of the big icon and the title.
 
 The same two files are what `tests/test_designer_demo_render.py` renders
 through a real Home Assistant -- with the `sun`, `zone` and `person`
 integrations set up and **no seeded state** -- at the three fabricated
 display geometries, so a demo edit that references an entity a stock
-install lacks fails the suite. If the demo files cannot be fetched, the
-panel logs one warning and the designer's bundled demo is loaded instead.
+install lacks fails the suite. The demo's element types are every
+`odl_renderer.types.ElementType` but `plot` (dropped, above) and `diagram`
+(the designer has no such element; its bundle does not contain the word).
 
-The host demo takes effect once the vendored designer's `mount()` knows the
-`demo` option; an older vendored build reads its known options by name and
-ignores the key, so the panel passes it unconditionally.
+If a demo file cannot be fetched within ten seconds, or does not parse, the
+panel mounts the designer without the option -- Load Demo then shows the
+designer's bundled showcase -- and says so once, on the console and as a
+notification toast.
+
+**Two gates, neither met at the time of writing:**
+
+- The host demo takes effect once the vendored designer's `mount()` knows
+  the `demo` option (designer PR #201 defines it as `demo?: { payload:
+  string; variables?: Record<string, string> }`). The vendored 3.6.0 build
+  reads its known options by name and ignores the key, so the panel passes
+  it unconditionally and Load Demo still shows the bundled showcase until
+  the vendor pin moves.
+- The variables colour anything only once the panel pre-renders templates
+  with them before Send (PR #4). Today a Send expands `{{ accent_color }}`
+  with no variables, HA renders it as '' and odl-renderer paints '' white,
+  so the icon and the title vanish on a white background; the circle takes
+  its `else` branch and stays white.
 
 ## Access and exposure
 

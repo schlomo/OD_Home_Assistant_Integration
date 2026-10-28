@@ -29,7 +29,7 @@
     Every drawcustom element type on one canvas, with Home Assistant templates that read
     /only entities every install has: sun.sun, zone.home and your person entities. Edit any
     /field, watch the preview, then Send to a display. The Variables tab sets alert and
-    /accent_color. A plot element is in the insert menu once a sensor has recorded history.
+    /accent_color. The plot element is in the insert menu; it needs a sensor with recorded history.
   delimiter: /
   x: 40
   # Line advance in pixels: 19 is rbm.ttf's line height at size 16.
@@ -134,7 +134,7 @@
   # A namespace() loop, then a sun.sun attribute.
   value: >-
     {%- set ns = namespace(sum=0) -%}{%- for v in [21, 22, 23, 20] -%}{%- set ns.sum = ns.sum + v -%}{%- endfor -%}Avg
-    {{ (ns.sum / 4) | round(1) }}°C · Sun {{ state_attr('sun.sun', 'elevation') | round(0) }}° high
+    {{ (ns.sum / 4) | round(1) }}°C · Sun {{ state_attr('sun.sun', 'elevation') | round(0, default='?') }}° high
   x: 40
   y: 348
   size: 15
@@ -166,8 +166,8 @@
   resize_method: contain
 - type: text
   value: >-
-    Sunrise {{ as_timestamp(state_attr('sun.sun', 'next_rising')) | timestamp_custom('%H:%M') }}
-    · Sunset {{ as_timestamp(state_attr('sun.sun', 'next_setting')) | timestamp_custom('%H:%M') }}
+    Sunrise {{ as_timestamp(state_attr('sun.sun', 'next_rising'), none) | timestamp_custom('%H:%M', true, '?') }}
+    · Sunset {{ as_timestamp(state_attr('sun.sun', 'next_setting'), none) | timestamp_custom('%H:%M', true, '?') }}
   x: 440
   y: 272
   size: 17
@@ -175,8 +175,8 @@
   color: black
 - type: text
   value: >-
-    {{ state_attr('zone.home', 'friendly_name') }}: {{ states('zone.home') }} of
-    {{ states.person | list | count }} people home
+    {{ state_attr('zone.home', 'friendly_name') }}: {{ states('zone.home') }} present,
+    {{ states.person | list | count }} person entities
   x: 440
   y: 304
   size: 17
@@ -184,7 +184,7 @@
   color: black
 - type: text
   value: >-
-    Sun azimuth {{ state_attr('sun.sun', 'azimuth') | round(0) }}°,
+    Sun azimuth {{ state_attr('sun.sun', 'azimuth') | round(0, default='?') }}°,
     {{ 'rising' if state_attr('sun.sun', 'rising') else 'setting' }}
   x: 440
   y: 336
