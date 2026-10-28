@@ -17,8 +17,9 @@
  *
  * A failure to load the demo must not break the mount: every failure path
  * -- a rejected fetch, a non-2xx answer, a malformed file, or a fetch that
- * never settles (each fetch is aborted after `timeoutMs`, so a hang becomes
- * a rejection instead of leaving the designer unmounted forever) --
+ * never settles (each fetch is aborted after `timeoutMs` by a timer that
+ * is cleared the moment the fetch settles, so a hang becomes a rejection
+ * instead of leaving the designer unmounted forever) --
  * resolves to `{}` (no `demo` key, the designer keeps its bundled demo)
  * after exactly one `onFallback(message)` call, never a throw. The panel
  * routes that message to the console and to its notification toast, so
@@ -44,10 +45,24 @@ export function hostDemoUrls(moduleUrl) {
   };
 }
 
+// Not `AbortSignal.timeout()`: Node unrefs that timer, so under `node --test`
+// (Node 20 on CI) a test whose only pending work is the timeout drains the
+// event loop before the abort fires and the runner cancels it as "Promise
+// resolution is still pending". A plain `setTimeout` holds the loop until
+// it fires or is cleared, in Node and in the browser alike.
 async function fetchText(fetchImpl, url, timeoutMs) {
-  const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  return await res.text();
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new DOMException(`timed out after ${timeoutMs} ms`, 'TimeoutError')),
+    timeoutMs
+  );
+  try {
+    const res = await fetchImpl(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function parseVariables(text, url) {
