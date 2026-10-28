@@ -2,11 +2,14 @@
 // `renderPreview` seam: the REAL panel module, with the vendored designer
 // bundle replaced by a stub `mount` through a `node:module` load hook and
 // the few DOM globals the module touches at import time faked. What these
-// prove: the `opendisplay.drawcustom` service call and the render-endpoint
-// POST both receive LITERAL field values -- every template already
-// rendered through HA's `render_template` websocket command with the
-// designer's `context.variables` -- and a template failure aborts the
-// send/preview with an error that names the element and field.
+// prove: with `context.variables` present, the `opendisplay.drawcustom`
+// service call and the render-endpoint POST both receive LITERAL field
+// values -- every template rendered through HA's `render_template`
+// websocket command with those variables -- and a template failure aborts
+// the send/preview with an error that names the element and field; with
+// `context.variables` ABSENT (a designer that predates the field), the
+// payload passes through untouched and no render_template is ever sent,
+// exactly as before pre-rendering existed.
 //
 // Plain `node --test`, zero dependencies -- see key-containment.test.mjs's
 // own header comment for why this repo tests panel JS this way.
@@ -69,8 +72,26 @@ const PAYLOAD_YAML = `
   value: hello
   color: "{{ accent_color }}"
 `;
+const PARSED_PAYLOAD = [
+  { type: 'circle', x: 20, y: 20, radius: 10, fill: DEMO_CIRCLE_FILL },
+  { type: 'text', value: 'hello', color: '{{ accent_color }}' },
+];
 
-/** A frozen designer context, `variables` included (designer >= the release carrying context.variables). */
+/**
+ * What a strict Jinja render of the two demo templates does: each entry
+ * names the variables the template references and computes its value from
+ * them. The fake below enforces `message.strict` and `message.variables`
+ * exactly like HA -- a referenced name missing from the variables is an
+ * `error` event under strict (HA's `UndefinedError`), '' otherwise -- so a
+ * test cannot go green by handing out a canned answer for a variable that
+ * was never sent.
+ */
+const JINJA = {
+  [DEMO_CIRCLE_FILL]: { needs: ['alert'], value: (v) => (v.alert ? 'red' : 'white') },
+  '{{ accent_color }}': { needs: ['accent_color'], value: (v) => v.accent_color },
+};
+
+/** A frozen designer context; `variables` only when given (designer >= the release carrying it). */
 function context(variables, targetId = 'dev1') {
   return Object.freeze({
     targetId,
@@ -80,22 +101,30 @@ function context(variables, targetId = 'dev1') {
   });
 }
 
-/** `hass.connection.subscribeMessage` answering render_template from a table (an Error rejects). */
-function fakeConnection(table) {
+/** `hass.connection.subscribeMessage` rendering `render_template` with JINJA above, strictly. */
+function fakeConnection() {
   const messages = [];
   return {
     messages,
     subscribeMessage(callback, message) {
       messages.push(message);
-      const answer = table[message.template];
-      if (answer instanceof Error) return Promise.reject(answer);
-      queueMicrotask(() => callback({ result: answer, listeners: {} }));
+      const entry = JINJA[message.template];
+      assert.ok(entry, `unknown template in test: ${message.template}`);
+      const variables = message.variables ?? {};
+      const missing = entry.needs.find((name) => !(name in variables));
+      queueMicrotask(() => {
+        if (missing && message.strict) {
+          callback({ error: `UndefinedError: '${missing}' is undefined`, level: 'ERROR' });
+        } else {
+          callback({ result: missing ? '' : entry.value(variables), listeners: {} });
+        }
+      });
       return Promise.resolve(() => {});
     },
   };
 }
 
-function panelWith({ table, fetchWithAuth }) {
+function panelWith({ fetchWithAuth } = {}) {
   const panel = new PanelClass();
   const serviceCalls = [];
   panel._hass = {
@@ -103,7 +132,7 @@ function panelWith({ table, fetchWithAuth }) {
       serviceCalls.push(args);
     },
     fetchWithAuth,
-    connection: fakeConnection(table),
+    connection: fakeConnection(),
   };
   panel._targetDisplaySpecs = new Map([['dev1', { rotationDegrees: 0 }]]);
   return { panel, serviceCalls };
@@ -113,10 +142,15 @@ function notifications(panel) {
   return panel.events.filter((e) => e.type === 'hass-notification').map((e) => e.detail.message);
 }
 
+function recordingFetch(posts) {
+  return async (url, init) => {
+    posts.push([url, JSON.parse(init.body)]);
+    return { ok: true, blob: async () => 'png-bytes' };
+  };
+}
+
 test('send: the service receives rendered literals, with context.variables as the template context', async () => {
-  const { panel, serviceCalls } = panelWith({
-    table: { [DEMO_CIRCLE_FILL]: 'red', '{{ accent_color }}': 'red' },
-  });
+  const { panel, serviceCalls } = panelWith();
   const variables = { alert: 'true', accent_color: 'red' };
 
   await panel._send(PAYLOAD_YAML, context(variables));
@@ -141,13 +175,8 @@ test('send: the service receives rendered literals, with context.variables as th
   assert.match(notifications(panel).at(-1), /^Sent 2 element\(s\)/);
 });
 
-test('send: a failing template aborts the call and the notification names element and field', async () => {
-  const { panel, serviceCalls } = panelWith({
-    table: {
-      [DEMO_CIRCLE_FILL]: 'red',
-      '{{ accent_color }}': new Error("UndefinedError: 'accent_color' is undefined"),
-    },
-  });
+test('send: a variable the payload references but the designer did not define aborts the call, naming element and field', async () => {
+  const { panel, serviceCalls } = panelWith();
 
   await panel._send(PAYLOAD_YAML, context({ alert: 'true' }));
 
@@ -159,27 +188,22 @@ test('send: a failing template aborts the call and the notification names elemen
   assert.equal(panel._sending, false, 'the in-flight guard is released');
 });
 
-test('send: a designer without context.variables still pre-renders, with {} as variables', async () => {
-  const { panel, serviceCalls } = panelWith({
-    table: { [DEMO_CIRCLE_FILL]: 'white', '{{ accent_color }}': '' },
-  });
+test('send: a designer WITHOUT context.variables sends the payload untouched and renders nothing client-side', async () => {
+  // The currently pinned designer (3.6.0) never hands over `variables`.
+  // Pre-rendering strictly with {} would fail every variable reference;
+  // instead the panel behaves exactly as before: HA renders server-side.
+  const { panel, serviceCalls } = panelWith();
 
   await panel._send(PAYLOAD_YAML, context(undefined));
 
-  assert.equal(serviceCalls.length, 1);
-  assert.equal(serviceCalls[0][2].payload[0].fill, 'white');
-  for (const message of panel._hass.connection.messages) assert.deepEqual(message.variables, {});
+  assert.equal(serviceCalls.length, 1, `notifications: ${notifications(panel)}`);
+  assert.deepEqual(serviceCalls[0][2].payload, PARSED_PAYLOAD);
+  assert.equal(panel._hass.connection.messages.length, 0, 'no render_template subscription at all');
 });
 
 test('preview: the render endpoint receives the same rendered literals', async () => {
   const posts = [];
-  const { panel } = panelWith({
-    table: { [DEMO_CIRCLE_FILL]: 'red', '{{ accent_color }}': 'red' },
-    fetchWithAuth: async (url, init) => {
-      posts.push([url, JSON.parse(init.body)]);
-      return { ok: true, blob: async () => 'png-bytes' };
-    },
-  });
+  const { panel } = panelWith({ fetchWithAuth: recordingFetch(posts) });
 
   const blob = await panel._renderPreview(PAYLOAD_YAML, context({ alert: 'true', accent_color: 'red' }));
 
@@ -196,13 +220,7 @@ test('preview: the render endpoint receives the same rendered literals', async (
 
 test('preview: a failing template rejects before any POST, naming element and field', async () => {
   const posts = [];
-  const { panel } = panelWith({
-    table: { [DEMO_CIRCLE_FILL]: new Error("UndefinedError: 'alert' is undefined"), '{{ accent_color }}': 'red' },
-    fetchWithAuth: async (url, init) => {
-      posts.push([url, init]);
-      return { ok: true, blob: async () => 'png-bytes' };
-    },
-  });
+  const { panel } = panelWith({ fetchWithAuth: recordingFetch(posts) });
 
   await assert.rejects(panel._renderPreview(PAYLOAD_YAML, context({ accent_color: 'red' })), {
     message:
@@ -212,13 +230,24 @@ test('preview: a failing template rejects before any POST, naming element and fi
   assert.equal(posts.length, 0);
 });
 
-test('send and preview without a websocket connection report the connection as unavailable', async () => {
-  const { panel, serviceCalls } = panelWith({ table: {} });
+test('preview: a designer WITHOUT context.variables POSTs the payload untouched and renders nothing client-side', async () => {
+  const posts = [];
+  const { panel } = panelWith({ fetchWithAuth: recordingFetch(posts) });
+
+  await panel._renderPreview(PAYLOAD_YAML, context(undefined));
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0][1].payload, PARSED_PAYLOAD);
+  assert.equal(panel._hass.connection.messages.length, 0);
+});
+
+test('send and preview with variables but no websocket connection report the connection as unavailable', async () => {
+  const { panel, serviceCalls } = panelWith({ fetchWithAuth: recordingFetch([]) });
   delete panel._hass.connection;
 
   await panel._send(PAYLOAD_YAML, context({}));
   assert.equal(serviceCalls.length, 0);
-  assert.deepEqual(notifications(panel), ['Home Assistant connection unavailable']);
+  assert.deepEqual(notifications(panel), ['Send failed: Home Assistant connection unavailable']);
   await assert.rejects(panel._renderPreview(PAYLOAD_YAML, context({})), {
     message: 'Home Assistant connection unavailable',
   });

@@ -474,7 +474,7 @@ class OpenDisplayDesignerPanel extends HTMLElement {
   async _send(payloadYaml, context) {
     const hass = this._hass;
     const targetId = context.targetId;
-    if (!hass?.callService || !hass.connection?.subscribeMessage) {
+    if (!hass?.callService) {
       this._notify('Home Assistant connection unavailable');
       return;
     }
@@ -498,7 +498,8 @@ class OpenDisplayDesignerPanel extends HTMLElement {
     this._pushActions();
     try {
       // Same pre-render step `_renderPreview` runs, so the service receives
-      // the literals the preview was rendered from (see _prerender below).
+      // the literals the preview was rendered from (see _prerender below);
+      // a failure here lands in the catch below, as "Send failed: ...".
       const rendered = await this._prerender(elements, context);
       await hass.callService(
         'opendisplay',
@@ -521,21 +522,23 @@ class OpenDisplayDesignerPanel extends HTMLElement {
   /**
    * Render every templated field with the designer's Variables before the
    * payload leaves the browser (template-prerender.js has the full
-   * writeup). `context.variables` (`Readonly<Record<string, string>>`) is
-   * on both `HostActionContext` and `HostPreviewContext` from the designer
-   * release that introduces it; an older designer hands over no field at
-   * all, which renders with `{}` -- still through HA, so a templated
-   * payload meets the same strict error surface either way. A failing
-   * template rejects with the element index, type and field named, and
-   * reaches the user through the caller's own error path (the send
-   * notification, the designer's preview error state).
+   * writeup). `context.variables` (`Readonly<Record<string, string>>`,
+   * always present) is on both `HostActionContext` and
+   * `HostPreviewContext` from the designer release that introduces it. A
+   * designer that predates that release hands over NO field at all -- then
+   * nothing is pre-rendered and the payload goes out exactly as it did
+   * before this step existed, templates included, for HA to render
+   * server-side (`render_payload_templates`): rendering strictly with an
+   * empty variable set would instead fail every field that references a
+   * variable. A failing template rejects with the element index, type and
+   * field named, and reaches the user through the caller's own error path
+   * (the send notification, the designer's preview error state).
    */
   _prerender(elements, context) {
-    return prerenderElements(
-      elements,
-      context.variables ?? {},
-      haTemplateRenderer(this._hass.connection)
-    );
+    if (context.variables === undefined) return elements;
+    const connection = this._hass?.connection;
+    if (!connection?.subscribeMessage) throw new Error('Home Assistant connection unavailable');
+    return prerenderElements(elements, context.variables, haTemplateRenderer(connection));
   }
 
   /**
@@ -551,9 +554,7 @@ class OpenDisplayDesignerPanel extends HTMLElement {
    */
   async _renderPreview(payloadYaml, context) {
     const hass = this._hass;
-    if (!hass?.fetchWithAuth || !hass.connection?.subscribeMessage) {
-      throw new Error('Home Assistant connection unavailable');
-    }
+    if (!hass?.fetchWithAuth) throw new Error('Home Assistant connection unavailable');
 
     let elements;
     try {

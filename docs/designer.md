@@ -87,10 +87,15 @@ Send and before every preview it renders each templated field value
 `render_template` websocket command with the Variables, strict, and then
 calls the **unchanged** `opendisplay.drawcustom` service (or the render
 endpoint) with literal values. Send and preview share the one procedure, so
-the preview is rendered from exactly the literals the display receives.
+the preview is rendered from the same literals the display receives. A
+rendered value that itself still contains template syntax is refused (the
+service would otherwise render it a second time); identical templates are
+rendered once per send or preview, a few at a time.
 
 An undefined variable or an invalid template fails the send or preview
-before anything reaches Home Assistant, naming the element and field:
+before anything reaches Home Assistant, naming the element and field (the
+service's own template error, for a call from an automation, names the
+element and its type but no field):
 
 ```
 Send failed: Element 6 (type 'circle') field 'fill' has an invalid template: UndefinedError: 'alert' is undefined
@@ -100,9 +105,12 @@ The service itself is untouched: `render_payload_templates` (`services.py`)
 still renders whatever templates reach it, with no variables, exactly as
 for a call from an automation. A designer release older than the one that
 introduced `context.variables` hands over no field at all; the panel then
-renders with an empty variable set, still through HA.
-`tests/test_designer_demo_render.py` models the same procedure with HA's own
-`render_complex` against the designer's Load Demo.
+pre-renders nothing and sends the payload exactly as before, templates
+included, for the service to render server-side (so with such a designer
+the demo's `alert`-gated circle is white, as it was).
+`tests/test_designer_demo_render.py` models the same procedure -- strict,
+per field, with the Variables as context -- with HA's own
+`Template.async_render` against the designer's Load Demo.
 
 ## The render endpoint
 
