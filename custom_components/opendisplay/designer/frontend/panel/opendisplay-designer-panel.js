@@ -25,6 +25,7 @@ import { containKeyEvents } from './key-containment.js';
 import { installUnsavedWorkWarning } from './unsaved-work.js';
 import { renderRequestBody, sendCallData } from './drawcustom-request.js';
 import { assetRequestUrl } from './asset-request.js';
+import { haTemplateRenderer, prerenderElements } from './template-prerender.js';
 
 const TAG = 'opendisplay-designer-panel';
 const RENDER_URL = '/api/opendisplay/designer/render';
@@ -473,7 +474,7 @@ class OpenDisplayDesignerPanel extends HTMLElement {
   async _send(payloadYaml, context) {
     const hass = this._hass;
     const targetId = context.targetId;
-    if (!hass?.callService) {
+    if (!hass?.callService || !hass.connection?.subscribeMessage) {
       this._notify('Home Assistant connection unavailable');
       return;
     }
@@ -496,10 +497,13 @@ class OpenDisplayDesignerPanel extends HTMLElement {
     this._sending = true;
     this._pushActions();
     try {
+      // Same pre-render step `_renderPreview` runs, so the service receives
+      // the literals the preview was rendered from (see _prerender below).
+      const rendered = await this._prerender(elements, context);
       await hass.callService(
         'opendisplay',
         'drawcustom',
-        sendCallData(elements, this._targetDisplaySpecs.get(targetId), context),
+        sendCallData(rendered, this._targetDisplaySpecs.get(targetId), context),
         // HA's separate service-call "target" (attributes the call to a
         // device in the logbook/trace UI), independent of the `device_id`
         // the service schema itself requires inside the data above.
@@ -515,6 +519,26 @@ class OpenDisplayDesignerPanel extends HTMLElement {
   }
 
   /**
+   * Render every templated field with the designer's Variables before the
+   * payload leaves the browser (template-prerender.js has the full
+   * writeup). `context.variables` (`Readonly<Record<string, string>>`) is
+   * on both `HostActionContext` and `HostPreviewContext` from the designer
+   * release that introduces it; an older designer hands over no field at
+   * all, which renders with `{}` -- still through HA, so a templated
+   * payload meets the same strict error surface either way. A failing
+   * template rejects with the element index, type and field named, and
+   * reaches the user through the caller's own error path (the send
+   * notification, the designer's preview error state).
+   */
+  _prerender(elements, context) {
+    return prerenderElements(
+      elements,
+      context.variables ?? {},
+      haTemplateRenderer(this._hass.connection)
+    );
+  }
+
+  /**
    * `renderPreview` host seam (docs/embedding.md `renderPreview`) — POSTs to
    * this integration's own render endpoint (maintainer ruling 2026-08-30:
    * preview must never touch a live display's own state). The endpoint
@@ -527,7 +551,9 @@ class OpenDisplayDesignerPanel extends HTMLElement {
    */
   async _renderPreview(payloadYaml, context) {
     const hass = this._hass;
-    if (!hass?.fetchWithAuth) throw new Error('Home Assistant connection unavailable');
+    if (!hass?.fetchWithAuth || !hass.connection?.subscribeMessage) {
+      throw new Error('Home Assistant connection unavailable');
+    }
 
     let elements;
     try {
@@ -536,11 +562,13 @@ class OpenDisplayDesignerPanel extends HTMLElement {
       throw new Error(`Cannot preview invalid YAML: ${errMsg(err)}`);
     }
 
-    // Same builder module the `send` action uses, so preview and send derive
-    // `dither`/`rotate` from the designer's live context identically instead
-    // of two lookalike expressions that can drift.
+    // Same pre-render step and builder module the `send` action uses, so
+    // preview and send derive the payload's literals and `dither`/`rotate`
+    // from the designer's live context identically instead of two lookalike
+    // expressions that can drift.
+    const rendered = await this._prerender(elements, context);
     const requestBody = renderRequestBody(
-      elements,
+      rendered,
       this._targetDisplaySpecs.get(context.targetId),
       context
     );
