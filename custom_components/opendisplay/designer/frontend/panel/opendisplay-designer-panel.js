@@ -25,6 +25,7 @@ import { containKeyEvents } from './key-containment.js';
 import { installUnsavedWorkWarning } from './unsaved-work.js';
 import { renderRequestBody, sendCallData } from './drawcustom-request.js';
 import { assetRequestUrl } from './asset-request.js';
+import { loadHostDemoOptions } from './host-demo.js';
 
 const TAG = 'opendisplay-designer-panel';
 const RENDER_URL = '/api/opendisplay/designer/render';
@@ -282,7 +283,7 @@ class OpenDisplayDesignerPanel extends HTMLElement {
       if (this._parentStylePatch.height === null) p.style.height = '100%';
     }
     this._renderShell();
-    this._mount();
+    void this._mount();
     // See containKeyEvents' own doc comment for the full root-cause writeup
     // (tier-1 round 2, CRITICAL) -- registered on `this`, the shadow root's
     // host, so it runs after the shadow root's own listeners (CodeMirror's
@@ -376,8 +377,15 @@ class OpenDisplayDesignerPanel extends HTMLElement {
     }
   }
 
-  _mount() {
+  async _mount() {
     if (this._handle) return;
+    // This integration's own Load Demo (host-demo.js), fetched before the
+    // designer mounts because `demo` is a mount option, not a later push.
+    // Resolves to `{}` (the designer keeps its bundled demo) on any failure,
+    // never throws. The element can be disconnected while this is in
+    // flight -- HA navigates away and back -- so re-check before mounting.
+    const demoOptions = await loadHostDemoOptions(import.meta.url);
+    if (this._handle || !this.isConnected) return;
     const mountEl = this._$('od-mount');
     if (!mountEl) return;
     try {
@@ -428,6 +436,13 @@ class OpenDisplayDesignerPanel extends HTMLElement {
           this._yamlErrorSummary = status.yamlErrorSummary;
           this._pushActions();
         },
+        // `demo: { payload, variables }` (MountOptions.demo): Load Demo
+        // loads frontend/demo/demo.yml, written for Home Assistant (only
+        // entities every install has, no plot), instead of the designer's
+        // bundled showcase. A vendored designer that predates the option
+        // reads its known keys by name and ignores this one, so it is
+        // harmless until the pin carries it.
+        ...demoOptions,
       });
     } catch (err) {
       console.error('opendisplay-designer-panel: mount failed', err);

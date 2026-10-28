@@ -11,6 +11,7 @@ itself never talks to Home Assistant directly.
 - [Preview isolation](#preview-isolation)
 - [The render endpoint](#the-render-endpoint)
 - [The asset endpoint](#the-asset-endpoint)
+- [Load Demo](#load-demo)
 - [Access and exposure](#access-and-exposure)
 - [Updating the vendored library](#updating-the-vendored-library)
 - [Known gaps](#known-gaps)
@@ -484,6 +485,41 @@ search directories can change without this integration knowing) — served
 with `Cache-Control: no-cache, must-revalidate` instead, acceptable since
 the designer resolves and caches an asset once per session rather than
 re-requesting it on every render.
+
+## Load Demo
+
+**Home Assistant ships its own Load Demo.** The designer's bundled showcase
+references entities a real Home Assistant does not have
+(`sensor.temperature`, `weather.forecast_home`, …) and a `plot` element that
+needs recorder history for a numeric sensor, so on a live install its fields
+rendered "unknown" and Send failed. The panel instead hands the designer
+`custom_components/opendisplay/designer/frontend/demo/demo.yml` (the
+payload) and `demo.json` (its variables) through the `demo` mount option
+(`frontend/panel/host-demo.js`), so Load Demo in Home Assistant loads a
+payload written for it:
+
+- **Only entities every install has**: `sun.sun` and its attributes
+  (`elevation`, `azimuth`, `next_rising`, `next_setting`, `rising`),
+  `zone.home`, the `person` domain, and template globals such as `now()`.
+  Nothing in the Referenced states list should read "not supplied" on a
+  stock install.
+- **No plot element.** No entity every install has carries recorder
+  history. The plot is still available from the editor's insert menu; point
+  it at a numeric sensor of your own.
+- **Variables `alert` and `accent_color`** (Variables tab) drive the circle
+  (red while `alert` is set, white otherwise) and the accent colour of the
+  big icon and the title.
+
+The same two files are what `tests/test_designer_demo_render.py` renders
+through a real Home Assistant -- with the `sun`, `zone` and `person`
+integrations set up and **no seeded state** -- at the three fabricated
+display geometries, so a demo edit that references an entity a stock
+install lacks fails the suite. If the demo files cannot be fetched, the
+panel logs one warning and the designer's bundled demo is loaded instead.
+
+The host demo takes effect once the vendored designer's `mount()` knows the
+`demo` option; an older vendored build reads its known options by name and
+ignores the key, so the panel passes it unconditionally.
 
 ## Access and exposure
 
