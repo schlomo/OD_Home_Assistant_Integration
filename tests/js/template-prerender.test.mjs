@@ -7,11 +7,15 @@
 //
 // Plain `node --test`, zero dependencies -- see key-containment.test.mjs's
 // own header comment for why this repo tests panel JS this way. The HA
-// websocket is a fake `subscribeMessage` here; `render_template` is a
-// SUBSCRIPTION (it keeps re-rendering on state changes), so the fake can
-// deliver its events before or after the subscribe promise settles, and
-// the tests pin that the first result wins and the subscription is dropped
-// right after it either way.
+// websocket is a fake `subscribeMessage` here, modelled on HA's real
+// `handle_render_template` (websocket_api/commands.py): `render_template`
+// is a SUBSCRIPTION that keeps re-rendering on state changes; a template
+// whose first strict render fails is reported as an `error` EVENT (the
+// tracker's `log_fn`), not as a rejected subscribe -- `send_error` only
+// happens for the render timeout. Events can land before or after the
+// subscribe promise settles (home-assistant-js-websocket delivers events
+// to the callback as soon as the command id is known), and the tests pin
+// that the first result wins and the subscription is dropped either way.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
@@ -22,13 +26,14 @@ import {
 
 /**
  * A fake `hass.connection` whose `render_template` answers from a lookup
- * table of template -> result, recording every message it was sent and
- * every unsubscribe. `deliver: 'before'` fires the first event before the
- * subscribe promise resolves (HA's real ordering: `send_result` then the
- * first `event` -- but the browser-side promise may settle either side of
- * the callback), `'after'` fires it on a later microtask.
+ * table of template -> result (an Error = HA's `{error, level: 'ERROR'}`
+ * event; `undefined` = never answers, like a dead socket), recording every
+ * message it was sent and every unsubscribe. `deliver: 'before'` fires the
+ * first event before the subscribe promise resolves, `'after'` on a later
+ * microtask. `rejectWith` makes the subscribe itself fail (HA's
+ * `send_error`, e.g. "Exceeded maximum execution time of 5s").
  */
-function fakeConnection(table, { deliver = 'after', extraResults = 0 } = {}) {
+function fakeConnection(table, { deliver = 'after', extraResults = 0, rejectWith } = {}) {
   const messages = [];
   const unsubscribed = [];
   const connection = {
@@ -37,8 +42,10 @@ function fakeConnection(table, { deliver = 'after', extraResults = 0 } = {}) {
     subscribeMessage(callback, message) {
       messages.push(message);
       const unsub = () => unsubscribed.push(message.template);
+      if (rejectWith) return Promise.reject(rejectWith);
       const answer = table[message.template];
       const fire = () => {
+        if (answer === undefined) return; // never answers
         if (answer instanceof Error) {
           callback({ error: answer.message, level: 'ERROR' });
           return;
@@ -48,11 +55,6 @@ function fakeConnection(table, { deliver = 'after', extraResults = 0 } = {}) {
           callback({ result: `${answer}-again-${i}`, listeners: {} });
         }
       };
-      if (answer === undefined) {
-        // HA: a template that fails its first strict render rejects the
-        // subscribe itself (`send_error`, `template_error`).
-        return Promise.reject(new Error(`UndefinedError: '${message.template}' is undefined`));
-      }
       if (deliver === 'before') {
         fire();
         return Promise.resolve(unsub);
@@ -65,6 +67,11 @@ function fakeConnection(table, { deliver = 'after', extraResults = 0 } = {}) {
   };
   return connection;
 }
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** A fake rendering: the template's text minus its braces, so the result is not itself a template. */
+const rendered = (template) => `R(${template.replace(/[{}]/g, '')})`;
 
 test('isTemplateString mirrors HA is_template_string: {{, {% or {# anywhere', () => {
   assert.equal(isTemplateString('{{ alert }}'), true);
@@ -79,7 +86,7 @@ test('every templated string leaf is rendered, nested dicts and lists walked, th
   const seen = [];
   const render = async (template, variables) => {
     seen.push([template, variables]);
-    return `R(${template})`;
+    return rendered(template);
   };
   const elements = [
     {
@@ -99,13 +106,13 @@ test('every templated string leaf is rendered, nested dicts and lists walked, th
   assert.deepEqual(out, [
     {
       type: 'circle',
-      fill: "R({{ 'red' if alert else 'white' }})",
+      fill: "R( 'red' if alert else 'white' )",
       x: 10,
       visible: true,
       label: 'static',
-      nested: { color: 'R({{ accent_color }})', depth: { items: ['a', 'R({{ b }})', 3] } },
+      nested: { color: 'R( accent_color )', depth: { items: ['a', 'R( b )', 3] } },
     },
-    'R(bare {{ string }})',
+    'R(bare  string )',
   ]);
   // Only template strings reached the renderer, each with the variables.
   assert.deepEqual(
@@ -129,18 +136,40 @@ test('a payload with no templates comes back equal, with no renderer call at all
   assert.equal(calls, 0);
 });
 
-test('missing variables (designer before context.variables) are treated as {}', async () => {
-  const seen = [];
-  const out = await prerenderElements(
-    [{ type: 'text', value: '{{ 1 + 1 }}' }],
-    undefined,
-    async (template, variables) => {
-      seen.push(variables);
-      return 2;
-    }
-  );
-  assert.deepEqual(seen, [{}]);
-  assert.deepEqual(out, [{ type: 'text', value: 2 }]);
+test('identical template strings render ONCE per call (one subscription), every leaf gets the value', async () => {
+  // `report_errors: true` makes HA skip its template cache and spawn a
+  // render per subscription, so the panel dedupes on its side.
+  const connection = fakeConnection({ '{{ accent_color }}': 'red' });
+  const elements = [
+    { type: 'icon', fill: '{{ accent_color }}' },
+    { type: 'text', color: '{{ accent_color }}', outline: '{{ accent_color }}' },
+  ];
+  const out = await prerenderElements(elements, { accent_color: 'red' }, haTemplateRenderer(connection));
+  assert.equal(connection.messages.length, 1);
+  assert.deepEqual(out, [
+    { type: 'icon', fill: 'red' },
+    { type: 'text', color: 'red', outline: 'red' },
+  ]);
+});
+
+test('at most maxInFlight templates render at once', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const render = (template) =>
+    new Promise((resolve) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      setTimeout(() => {
+        inFlight -= 1;
+        resolve(rendered(template));
+      }, 1);
+    });
+  const elements = Array.from({ length: 10 }, (_, i) => ({ type: 'text', value: `{{ v${i} }}` }));
+
+  const out = await prerenderElements(elements, {}, render, { maxInFlight: 3 });
+
+  assert.equal(peak, 3);
+  assert.equal(out[9].value, 'R( v9 )');
 });
 
 test('a renderer failure surfaces as an Error naming element index, type and field path', async () => {
@@ -178,6 +207,41 @@ test('a nested field failure names the full path into the element', async () => 
   });
 });
 
+test('with several failures the FIRST in traversal order is reported, whatever answers first', async () => {
+  // Leaves render in parallel; the last one to be asked answers (fails)
+  // first. The user still gets element 0's field, not element 2's.
+  const pending = [];
+  const render = (template) =>
+    new Promise((_resolve, reject) => {
+      pending.push(() => reject(new Error(`bad: ${template}`)));
+    });
+  const elements = [
+    { type: 'text', color: '{{ first }}' },
+    { type: 'text', value: 'plain' },
+    { type: 'icon', fill: '{{ second }}', outline: '{{ third }}' },
+  ];
+  const run = prerenderElements(elements, {}, render);
+  await tick();
+  assert.equal(pending.length, 3);
+  for (const fail of pending.reverse()) fail();
+  await assert.rejects(run, {
+    message: "Element 0 (type 'text') field 'color' has an invalid template: bad: {{ first }}",
+  });
+});
+
+test('a result that still contains template syntax is refused, naming element and field', async () => {
+  // services.py's render_payload_templates renders ANY string that still
+  // looks like a template; the panel refuses rather than letting HA render
+  // a rendered value a second time, silently.
+  const render = async (template) => (template === '{{ raw }}' ? '{{ states.sensor.x.state }}' : 'ok');
+  const elements = [{ type: 'text', value: '{{ fine }}', label: { text: '{{ raw }}' } }];
+  await assert.rejects(prerenderElements(elements, {}, render), {
+    message:
+      "Element 0 (type 'text') field 'label.text' rendered to a value that still contains" +
+      ' template syntax: "{{ states.sensor.x.state }}"',
+  });
+});
+
 test('haTemplateRenderer sends a strict, error-reporting render_template with the variables', async () => {
   const connection = fakeConnection({ '{{ alert }}': 'true' });
   const render = haTemplateRenderer(connection);
@@ -192,7 +256,7 @@ test('haTemplateRenderer sends a strict, error-reporting render_template with th
   assert.equal(message.template, '{{ alert }}');
   assert.equal(message.variables, variables);
   assert.equal(message.strict, true, 'strict: undefined variable = error, like the script engine');
-  assert.equal(message.report_errors, true, 'report_errors: later failures arrive as error events');
+  assert.equal(message.report_errors, true, 'report_errors: failures arrive as error events');
   assert.ok(Number.isFinite(message.timeout) && message.timeout > 0, 'a render timeout is set');
 });
 
@@ -210,28 +274,41 @@ for (const deliver of ['before', 'after']) {
     const render = haTemplateRenderer(connection);
 
     const result = await render('{{ x }}', {});
-    // Let any extra events and the unsubscribe settle.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
 
     assert.equal(result, 'first');
     assert.deepEqual(connection.unsubscribed, ['{{ x }}'], 'the subscription is dropped exactly once');
   });
+
+  test(`haTemplateRenderer rejects on an error event -- HA's shape for a strict first-render failure (event ${deliver} subscribe settles)`, async () => {
+    const connection = fakeConnection(
+      { '{{ nope }}': new Error("UndefinedError: 'nope' is undefined") },
+      { deliver }
+    );
+    const render = haTemplateRenderer(connection);
+    await assert.rejects(render('{{ nope }}', {}), { message: "UndefinedError: 'nope' is undefined" });
+    await tick();
+    assert.deepEqual(connection.unsubscribed, ['{{ nope }}']);
+  });
 }
 
-test('haTemplateRenderer rejects on an error event, with the error text', async () => {
-  const connection = fakeConnection({
-    '{{ 1 / 0 }}': new Error('ZeroDivisionError: division by zero'),
-  });
+test('haTemplateRenderer rejects when the subscribe itself fails (HA send_error: render timeout)', async () => {
+  const connection = fakeConnection({}, { rejectWith: { code: 'template_error', message: 'Exceeded maximum execution time of 5s' } });
   const render = haTemplateRenderer(connection);
-  await assert.rejects(render('{{ 1 / 0 }}', {}), { message: 'ZeroDivisionError: division by zero' });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(connection.unsubscribed, ['{{ 1 / 0 }}']);
+  await assert.rejects(render('{{ slow }}', {}), { message: 'Exceeded maximum execution time of 5s' });
+  assert.deepEqual(connection.unsubscribed, []);
 });
 
-test('haTemplateRenderer rejects when the subscribe itself fails (strict first-render error)', async () => {
-  const connection = fakeConnection({});
-  const render = haTemplateRenderer(connection);
-  await assert.rejects(render('{{ nope }}', {}), { message: "UndefinedError: '{{ nope }}' is undefined" });
+test('haTemplateRenderer gives up on a reply that never comes, with a clear message, and unsubscribes', async () => {
+  // A dead socket must not leave the send guard stuck or a preview
+  // promise unsettled forever.
+  const connection = fakeConnection({ '{{ silent }}': undefined });
+  const render = haTemplateRenderer(connection, { replyTimeoutMs: 20 });
+  await assert.rejects(render('{{ silent }}', {}), {
+    message: 'Home Assistant did not answer the template render within 0.02s',
+  });
+  await tick();
+  assert.deepEqual(connection.unsubscribed, ['{{ silent }}']);
 });
 
 test('end to end: the Load Demo circle takes its truthy branch with alert = "true"', async () => {
