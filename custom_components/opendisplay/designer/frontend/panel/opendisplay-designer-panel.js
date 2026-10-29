@@ -389,6 +389,9 @@ class OpenDisplayDesignerPanel extends HTMLElement {
     // be disconnected while this is in flight -- HA navigates away and
     // back -- so re-check before mounting.
     const demoOptions = await loadHostDemoOptions(import.meta.url, {
+      // Malformed demo YAML would otherwise throw out of mount() itself
+      // (HostDemo.payload, vendored .d.ts) and blank the panel.
+      parsePayload,
       onFallback: (message) => {
         console.warn(`${TAG}: ${message}`);
         this._notify(message);
@@ -445,12 +448,11 @@ class OpenDisplayDesignerPanel extends HTMLElement {
           this._yamlErrorSummary = status.yamlErrorSummary;
           this._pushActions();
         },
-        // `demo: { payload, variables }` (MountOptions.demo): Load Demo
-        // loads frontend/demo/demo.yml, written for Home Assistant (only
-        // entities every install has, no plot), instead of the designer's
-        // bundled showcase. A vendored designer that predates the option
-        // reads its known keys by name and ignores this one, so it is
-        // harmless until the pin carries it.
+        // `demo: { payload, variables }` (MountOptions.demo, designer
+        // 3.8.0): Load Demo loads frontend/demo/demo.yml, written for Home
+        // Assistant (only entities every install has, no plot), instead of
+        // the designer's bundled showcase. Spread, not assigned: an empty
+        // fragment (demo not loaded) leaves Load Demo on the bundled demo.
         ...demoOptions,
       });
     } catch (err) {

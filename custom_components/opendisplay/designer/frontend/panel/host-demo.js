@@ -1,7 +1,7 @@
 /**
  * This integration's own Load Demo for the designer's `demo` mount option
- * (`MountOptions.demo`: `{ payload: string; variables?: Record<string,
- * string> }`, designer PR #201).
+ * (`MountOptions.demo`, a `HostDemo`: `{ payload: string; variables?:
+ * Record<string, string> }`, designer 3.8.0).
  *
  * The designer's bundled showcase references entities a real Home
  * Assistant does not have (sensor.temperature, weather.forecast_home, …)
@@ -25,9 +25,12 @@
  * routes that message to the console and to its notification toast, so
  * the user learns why Load Demo shows the bundled showcase.
  *
- * The vendored designer predating the option ignores an unknown `demo`
- * key (its `mount()` reads known keys by name), so passing it is safe
- * before and after the vendor pin carries it.
+ * "Malformed file" includes the payload's YAML: `HostDemo.payload` is
+ * "validated the same way [as `MountOptions.payload`]: malformed YAML
+ * throws out of `mount()`" (vendored `.d.ts`), which would take the whole
+ * panel down for a demo typo. The panel passes its own `parsePayload`
+ * (js-yaml, the same parse a send runs) as `parsePayload` here, so a
+ * payload that does not parse falls back like any other failure.
  *
  * Pure of the panel class so `node --test` can import it (the panel itself
  * pulls in the ~5.6MB vendored bundle).
@@ -92,11 +95,17 @@ function parseVariables(text, url) {
  * Load the demo and return the mount-option fragment to spread into
  * `mount()`'s options: `{ demo: { payload, variables } }`, or `{}` after
  * one `onFallback(message)` call when either file cannot be fetched or
- * parsed within `timeoutMs`.
+ * parsed within `timeoutMs`. `parsePayload(yamlText)` is the host's own
+ * YAML parse, expected to throw on malformed input; `null` skips it.
  */
 export async function loadHostDemoOptions(
   moduleUrl,
-  { fetchImpl = globalThis.fetch, onFallback = console.warn, timeoutMs = DEFAULT_TIMEOUT_MS } = {}
+  {
+    fetchImpl = globalThis.fetch,
+    onFallback = console.warn,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    parsePayload = null,
+  } = {}
 ) {
   const urls = hostDemoUrls(moduleUrl);
   try {
@@ -105,6 +114,13 @@ export async function loadHostDemoOptions(
       fetchText(fetchImpl, urls.variables, timeoutMs),
     ]);
     if (!payload.trim()) throw new Error(`${urls.payload} is empty`);
+    if (parsePayload) {
+      try {
+        parsePayload(payload);
+      } catch (err) {
+        throw new Error(`${urls.payload} is not valid YAML: ${err?.message ?? err}`);
+      }
+    }
     const variables = parseVariables(variablesText, urls.variables);
     return { demo: variables === undefined ? { payload } : { payload, variables } };
   } catch (err) {

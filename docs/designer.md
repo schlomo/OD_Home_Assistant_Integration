@@ -577,19 +577,18 @@ panel mounts the designer without the option -- Load Demo then shows the
 designer's bundled showcase -- and says so once, on the console and as a
 notification toast.
 
-**Two gates, neither met at the time of writing:**
+The vendored designer (3.8.0) honours the option (`MountOptions.demo`, a
+`HostDemo`); nothing gates the demo itself any more. The panel parses the
+payload with its own js-yaml before handing it over, because a `HostDemo`
+payload is validated like `MountOptions.payload` and malformed YAML throws
+out of `mount()`; a demo that does not parse therefore falls back like a
+fetch failure instead of blanking the panel.
 
-- The host demo takes effect once the vendored designer's `mount()` knows
-  the `demo` option (designer PR #201 defines it as `demo?: { payload:
-  string; variables?: Record<string, string> }`). The vendored 3.6.0 build
-  reads its known options by name and ignores the key, so the panel passes
-  it unconditionally and Load Demo still shows the bundled showcase until
-  the vendor pin moves.
-- The variables colour anything only once the panel pre-renders templates
-  with them before Send (PR #4). Today a Send expands `{{ accent_color }}`
-  with no variables, HA renders it as '' and odl-renderer paints '' white,
-  so the icon and the title vanish on a white background; the circle takes
-  its `else` branch and stays white.
+**One gate still open:** the variables colour anything only once the
+panel pre-renders templates with them before Send (PR #4). Today a Send
+expands `{{ accent_color }}` with no variables, HA renders it as '' and
+odl-renderer paints '' white, so the icon and the title vanish on a white
+background; the circle takes its `else` branch and stays white.
 
 ## Access and exposure
 

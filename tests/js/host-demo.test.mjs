@@ -138,6 +138,26 @@ test('a malformed variables file falls back rather than mounting a half demo', a
   }
 });
 
+test('a payload the host parser rejects falls back: malformed demo YAML must not throw out of mount()', async () => {
+  // HostDemo.payload is validated like MountOptions.payload -- malformed
+  // YAML throws out of mount() (vendored .d.ts) -- so the module runs the
+  // host's own parse first and treats a throw as any other failure.
+  const onFallback = fallbackSpy();
+  const parsePayload = (text) => {
+    if (text === PAYLOAD) return [];
+    throw new Error('bad indentation at line 2');
+  };
+  assert.deepEqual(
+    await load(okFetch(), onFallback, { parsePayload }),
+    { demo: { payload: PAYLOAD, variables: VARIABLES } },
+    'a parseable payload still loads'
+  );
+  const fetchImpl = okFetch({ 'demo.yml': { ok: true, status: 200, text: async () => '- :\n  x' } });
+  assert.deepEqual(await load(fetchImpl, onFallback, { parsePayload }), {});
+  assert.equal(onFallback.calls.length, 1);
+  assert.match(onFallback.calls[0][0], /not valid YAML.*bad indentation/);
+});
+
 test('an empty payload file falls back rather than offering an empty demo', async () => {
   const onFallback = fallbackSpy();
   const fetchImpl = okFetch({ 'demo.yml': { ok: true, status: 200, text: async () => '  \n' } });
