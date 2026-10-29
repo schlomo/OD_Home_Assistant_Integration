@@ -7,9 +7,10 @@
 // values -- every template rendered through HA's `render_template`
 // websocket command with those variables -- and a template failure aborts
 // the send/preview with an error that names the element and field; with
-// `context.variables` ABSENT (a designer that predates the field), the
-// payload passes through untouched and no render_template is ever sent,
-// exactly as before pre-rendering existed.
+// `context.variables` ABSENT (a designer build older than 3.7.0, which
+// introduced the field; the pinned 3.8.0 always sends it), the payload
+// passes through untouched and no render_template is ever sent, exactly as
+// before pre-rendering existed.
 //
 // Plain `node --test`, zero dependencies -- see key-containment.test.mjs's
 // own header comment for why this repo tests panel JS this way.
@@ -91,7 +92,7 @@ const JINJA = {
   '{{ accent_color }}': { needs: ['accent_color'], value: (v) => v.accent_color },
 };
 
-/** A frozen designer context; `variables` only when given (designer >= the release carrying it). */
+/** A frozen designer context; `variables` only when given (designer >= 3.7.0, as the pinned 3.8.0 is). */
 function context(variables, targetId = 'dev1') {
   return Object.freeze({
     targetId,
@@ -175,6 +176,44 @@ test('send: the service receives rendered literals, with context.variables as th
   assert.match(notifications(panel).at(-1), /^Sent 2 element\(s\)/);
 });
 
+test('send: typed variable values (as designer >= 3.7.0 coerces them) reach render_template as JSON natives', async () => {
+  // The vendored designer's report builder coerces each stored string the
+  // way its own preview does: "false" -> false, "5" -> 5, "none"/"" ->
+  // null, "[1, 2]" -> a list, "{...}" -> an object, a referenced-but-unset
+  // name -> "". The panel hands that map to HA untouched, so `alert: false`
+  // is falsy in Jinja (circle white), not the truthy string "false".
+  const { panel, serviceCalls } = panelWith();
+  const variables = Object.freeze({
+    alert: false,
+    accent_color: 'red',
+    count: 5,
+    nothing: null,
+    unset: '',
+    list: Object.freeze([1, 2]),
+    obj: Object.freeze({ a: 1 }),
+  });
+
+  await panel._send(PAYLOAD_YAML, context(variables));
+
+  assert.equal(serviceCalls.length, 1, `notifications: ${notifications(panel)}`);
+  assert.deepEqual(serviceCalls[0][2].payload, [
+    { type: 'circle', x: 20, y: 20, radius: 10, fill: 'white' },
+    { type: 'text', value: 'hello', color: 'red' },
+  ]);
+  for (const message of panel._hass.connection.messages) {
+    assert.equal(message.variables, variables, 'the designer map goes out as-is, no copy, no stringifying');
+    assert.deepEqual(JSON.parse(JSON.stringify(message.variables)), {
+      alert: false,
+      accent_color: 'red',
+      count: 5,
+      nothing: null,
+      unset: '',
+      list: [1, 2],
+      obj: { a: 1 },
+    });
+  }
+});
+
 test('send: a variable the payload references but the designer did not define aborts the call, naming element and field', async () => {
   const { panel, serviceCalls } = panelWith();
 
@@ -189,9 +228,10 @@ test('send: a variable the payload references but the designer did not define ab
 });
 
 test('send: a designer WITHOUT context.variables sends the payload untouched and renders nothing client-side', async () => {
-  // The currently pinned designer (3.6.0) never hands over `variables`.
-  // Pre-rendering strictly with {} would fail every variable reference;
-  // instead the panel behaves exactly as before: HA renders server-side.
+  // A designer older than 3.7.0 never hands over `variables` (the pinned
+  // 3.8.0 always does). Pre-rendering strictly with {} would fail every
+  // variable reference; instead the panel behaves exactly as before: HA
+  // renders server-side.
   const { panel, serviceCalls } = panelWith();
 
   await panel._send(PAYLOAD_YAML, context(undefined));

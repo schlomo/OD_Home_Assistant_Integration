@@ -260,6 +260,27 @@ test('haTemplateRenderer sends a strict, error-reporting render_template with th
   assert.ok(Number.isFinite(message.timeout) && message.timeout > 0, 'a render timeout is set');
 });
 
+test('haTemplateRenderer forwards typed variable values (boolean, number, null, list, object) untouched', async () => {
+  // Designer >= 3.7.0 reports variables as JSON natives, coerced as its own
+  // preview injects them; `false` must stay `false` on the wire (the string
+  // "false" is truthy in Jinja).
+  const connection = fakeConnection({ '{{ alert }}': false });
+  const variables = { alert: false, n: 5, nothing: null, list: [1, 2], obj: { a: 1 }, unset: '' };
+
+  const result = await haTemplateRenderer(connection)('{{ alert }}', variables);
+
+  assert.equal(result, false);
+  assert.equal(connection.messages[0].variables, variables);
+  assert.deepEqual(connection.messages[0].variables, {
+    alert: false,
+    n: 5,
+    nothing: null,
+    list: [1, 2],
+    obj: { a: 1 },
+    unset: '',
+  });
+});
+
 test('haTemplateRenderer keeps the native-typed result HA returns', async () => {
   const connection = fakeConnection({ '{{ 1 + 1 }}': 2, '{{ false }}': false, '{{ [1,2] }}': [1, 2] });
   const render = haTemplateRenderer(connection);

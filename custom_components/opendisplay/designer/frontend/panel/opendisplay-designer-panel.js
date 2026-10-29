@@ -522,17 +522,21 @@ class OpenDisplayDesignerPanel extends HTMLElement {
   /**
    * Render every templated field with the designer's Variables before the
    * payload leaves the browser (template-prerender.js has the full
-   * writeup). `context.variables` (`Readonly<Record<string, string>>`,
-   * always present) is on both `HostActionContext` and
-   * `HostPreviewContext` from the designer release that introduces it. A
-   * designer that predates that release hands over NO field at all -- then
-   * nothing is pre-rendered and the payload goes out exactly as it did
-   * before this step existed, templates included, for HA to render
-   * server-side (`render_payload_templates`): rendering strictly with an
-   * empty variable set would instead fail every field that references a
-   * variable. A failing template rejects with the element index, type and
-   * field named, and reaches the user through the caller's own error path
-   * (the send notification, the designer's preview error state).
+   * writeup). `context.variables` (`Readonly<Record<string,
+   * HostVariableValue>>`: JSON natives as the designer's own preview
+   * coerces them -- `false`, `5`, `null`, lists, objects, `""` for a
+   * referenced-but-unset name; always present, frozen) is on both
+   * `HostActionContext` and `HostPreviewContext` since designer 3.7.0; the
+   * vendored 3.8.0 sends it on every action and preview. The map goes to
+   * HA as-is, so `alert: false` is falsy in Jinja. A designer build older
+   * than 3.7.0 hands over NO field at all -- then nothing is pre-rendered
+   * and the payload goes out exactly as it did before this step existed,
+   * templates included, for HA to render server-side
+   * (`render_payload_templates`): rendering strictly with an empty variable
+   * set would instead fail every field that references a variable. A
+   * failing template rejects with the element index, type and field named,
+   * and reaches the user through the caller's own error path (the send
+   * notification, the designer's preview error state).
    */
   _prerender(elements, context) {
     if (context.variables === undefined) return elements;

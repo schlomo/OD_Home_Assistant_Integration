@@ -72,10 +72,16 @@ preview path has no code path that could write to it.
 
 ## Variables
 
-The designer's Variables (its State Simulator "Variables" tab, literal
-strings, handed to the panel as `context.variables` on both `onAction` and
-`renderPreview`) are the analog of an automation's script-level
-`variables:`. Home Assistant renders a script's service data with those as
+The designer's Variables (its State Simulator "Variables" tab, handed to
+the panel as `context.variables` on both `onAction` and `renderPreview`
+since designer 3.7.0 -- the vendored 3.8.0 always sends the field) are the
+analog of an automation's script-level `variables:`. The values arrive
+typed, exactly as the designer's own preview injects them: `"false"` is the
+boolean `false`, `"5"` the number 5, `"[1, 2]"` a list, `"none"` or an
+empty value `null`, anything else the string itself; a name the payload
+references but the user never defined arrives as `""`. The panel hands that
+map to Home Assistant untouched, so `{{ 'red' if alert else 'white' }}`
+agrees with the designer's preview. Home Assistant renders a script's service data with those as
 Jinja context (`template.render_complex`) *before* the service handler
 runs; a service called directly has no such step, which is why a template
 like `{{ 'red' if alert else 'white' }}` rendered white on a real display
@@ -103,11 +109,11 @@ Send failed: Element 6 (type 'circle') field 'fill' has an invalid template: Und
 
 The service itself is untouched: `render_payload_templates` (`services.py`)
 still renders whatever templates reach it, with no variables, exactly as
-for a call from an automation. A designer release older than the one that
-introduced `context.variables` hands over no field at all; the panel then
-pre-renders nothing and sends the payload exactly as before, templates
-included, for the service to render server-side (so with such a designer
-the demo's `alert`-gated circle is white, as it was).
+for a call from an automation. A designer build older than 3.7.0 hands
+over no `context.variables` field at all; the panel then pre-renders
+nothing and sends the payload exactly as before, templates included, for
+the service to render server-side (with such a build the demo's
+`alert`-gated circle is white, as it was before this step).
 `tests/test_designer_demo_render.py` models the same procedure -- strict,
 per field, with the Variables as context -- with HA's own
 `Template.async_render` against the designer's Load Demo.
