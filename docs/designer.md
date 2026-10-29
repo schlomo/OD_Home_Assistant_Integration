@@ -560,9 +560,9 @@ payload) and `demo.json` (its variables) through the `demo` mount option
 - **No plot element.** No entity every install has carries recorder
   history. The plot element is still available from the editor's insert
   menu; it needs a sensor with recorded history.
-- **Variables `alert` and `accent_color`** (Variables tab) are meant to
-  drive the circle (red while `alert` is set, white otherwise) and the
-  accent colour of the big icon and the title.
+- **Variables `alert` and `accent_color`** (Variables tab) drive the
+  circle (red while `alert` is set, white otherwise) and the accent colour
+  of the big icon and the title.
 
 The same two files are what `tests/test_designer_demo_render.py` renders
 through a real Home Assistant -- with the `sun`, `zone` and `person`
@@ -584,11 +584,14 @@ payload is validated like `MountOptions.payload` and malformed YAML throws
 out of `mount()`; a demo that does not parse therefore falls back like a
 fetch failure instead of blanking the panel.
 
-**One gate still open:** the variables colour anything only once the
-panel pre-renders templates with them before Send (PR #4). Today a Send
-expands `{{ accent_color }}` with no variables, HA renders it as '' and
-odl-renderer paints '' white, so the icon and the title vanish on a white
-background; the circle takes its `else` branch and stays white.
+The variables reach a Send and a preview because the panel pre-renders
+every templated field with them first ("Variables" above): the circle is
+red while `alert` is set, the big icon and the title take `accent_color`.
+Without that step a Send would expand `{{ accent_color }}` with no
+variables, HA would render it as '' and odl-renderer paint '' white;
+`tests/test_designer_demo_render.py`'s
+`test_raw_send_renders_designer_variables_empty` keeps that failure mode
+on record.
 
 ## Access and exposure
 

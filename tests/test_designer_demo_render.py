@@ -28,10 +28,11 @@ made it the wrong demo for Home Assistant:
 
 The HA demo references only entities every Home Assistant install has
 (``sun.sun``, ``zone.home``, the ``person`` domain) plus template globals
-such as ``now()``. This module renders it through the send procedure PR #4
-adds to the panel (maintainer decision 2026-10-27; modelled here with HA's
-own template engine, not imported from the panel JS): the designer's
-variables are the analog of an automation's script-level ``variables:``,
+such as ``now()``. This module renders it through the panel's shipped send
+procedure (maintainer decision 2026-10-27; ``template-prerender.js``,
+modelled here with HA's own template engine, not imported from the panel
+JS): the designer's variables are the analog of an automation's script-level
+``variables:``,
 so the panel pre-renders every templated field with those variables as
 Jinja context -- what HA's script engine does with
 ``template.render_complex(data, variables)`` before a service handler runs
@@ -238,8 +239,9 @@ def _prerender(
 ) -> list[dict[str, Any]]:
     """Render the payload's templates with the demo's variables, field by field.
 
-    Step one of the send procedure PR #4 adds to the panel, modelled with
-    HA's own template engine: the demo's variables as Jinja context, strict.
+    Step one of the panel's shipped send procedure, modelled with HA's own
+    template engine: the demo's variables as Jinja context, strict like the
+    panel (``render_template`` with ``strict: true``).
     A field whose template raises fails the test naming element index, type
     and field, mirroring the live send's error text.
     """
@@ -390,7 +392,7 @@ async def test_demo_prerenders_through_ha_jinja_with_its_variables(
     field 'progress' has an invalid template: TypeError: unsupported
     operand type(s) for /: 'str' and 'int'`` (designer 3.4.9's showcase).
 
-    The render is strict, as the pre-render PR #4 adds to the panel is, so
+    The render is strict, as the panel's pre-render is, so
     a variable the demo references but does not define raises here too; a
     template that merely warns (a missing attribute, an unknown filter
     argument) fails as well, because a demo that logs warnings on every
